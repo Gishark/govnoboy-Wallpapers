@@ -1,19 +1,12 @@
-import requests
-import time
-import subprocess
+import requests, shutil, ctypes, platform, os, subprocess, time
 from pathlib import Path
 from PIL import Image
-import os
-import platform
-import ctypes
-import shutil
 
 
 def detect_desktop_environment():
     if platform.system() == "Windows":
         return "windows"
-
-    # Для Linux систем
+    
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
     if "kde" in desktop:
         return "kde"
@@ -35,7 +28,7 @@ def detect_desktop_environment():
                 return "mate"
         except:
             pass
-
+    
     return "unknown"
 
 
@@ -70,10 +63,10 @@ def get_screen_resolution(desktop_env):
                     return (width, height)
         except:
             pass
-        return (1920, 1080)  # значения по умолчанию
+        return (1920, 1080)
 
 
-def prepare_image_windows(src_path, screen_size):
+def prepare_image(src_path, screen_size, desktop_env):
     with Image.open(src_path) as img:
         img = img.convert("RGB")
 
@@ -90,32 +83,15 @@ def prepare_image_windows(src_path, screen_size):
         offset = ((screen_size[0] - new_width) // 2, (screen_size[1] - new_height) // 2)
         new_img.paste(img, offset)
 
-        dst_path = src_path.with_suffix(".bmp")
-        new_img.save(dst_path, "BMP")
-        print(f"Конвертировано с вписыванием в экран: {dst_path}")
-        return dst_path
-
-
-def prepare_image_linux(src_path, screen_size):
-    with Image.open(src_path) as img:
-        img = img.convert("RGB")
-
-        ratio_w = screen_size[0] / img.width
-        ratio_h = screen_size[1] / img.height
-        scale_ratio = min(ratio_w, ratio_h)
-
-        new_width = int(img.width * scale_ratio)
-        new_height = int(img.height * scale_ratio)
-
-        img = img.resize((new_width, new_height), Image.LANCZOS)
-
-        new_img = Image.new("RGB", screen_size, (0, 0, 0))
-        offset = ((screen_size[0] - new_width) // 2, (screen_size[1] - new_height) // 2)
-        new_img.paste(img, offset)
-
-        dst_path = src_path.with_suffix(".jpg")
-        new_img.save(dst_path, "JPEG", quality=95)
-        print(f"Изображение адаптировано под экран: {dst_path}")
+        if desktop_env == "windows":
+            dst_path = src_path.with_suffix(".bmp")
+            new_img.save(dst_path, "BMP")
+            print(f"Конвертировано с вписыванием в экран: {dst_path}")
+        else:
+            dst_path = src_path.with_suffix(".jpg")
+            new_img.save(dst_path, "JPEG", quality=95)
+            print(f"Изображение адаптировано под экран: {dst_path}")
+            
         return dst_path
 
 
@@ -130,7 +106,7 @@ def set_wallpaper_windows(image_path):
 
 def set_wallpaper_kde(image_path):
     abs_path = str(image_path.resolve())
-
+    
     set_cmd = f"""
     qdbus org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript '
     var allDesktops = desktops();
@@ -142,17 +118,27 @@ def set_wallpaper_kde(image_path):
         d.writeConfig("FillMode", "2");  // 0=растянуть, 1=заполнить, 2=вписать
     }}'
     """
-
+    
     try:
-        subprocess.run(
-            "qdbus org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript 'var allDesktops = desktops();for (i=0;i<allDesktops.length;i++) {d = allDesktops[i];d.currentConfigGroup = Array(\"Wallpaper\", \"org.kde.image\", \"General\");d.writeConfig(\"Image\", \"\")}'",
-            shell=True, check=False)
-
+        subprocess.run("qdbus org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript 'var allDesktops = desktops();for (i=0;i<allDesktops.length;i++) {d = allDesktops[i];d.currentConfigGroup = Array(\"Wallpaper\", \"org.kde.image\", \"General\");d.writeConfig(\"Image\", \"\")}'", 
+                      shell=True, check=False)
+        
         subprocess.run(set_cmd, shell=True, check=True)
         print(f"Обои успешно установлены: {abs_path}")
     except subprocess.CalledProcessError as e:
         print(f"Ошибка при установке обоев: {e}")
         raise Exception("Не удалось установить обои")
+
+
+def set_wallpaper_gnome(image_path):
+    abs_path = str(image_path.resolve())
+    try:
+        subprocess.run(["gsettings", "set", "org.gnome.desktop.background", "picture-uri", f"file://{abs_path}"], check=True)
+        subprocess.run(["gsettings", "set", "org.gnome.desktop.background", "picture-options", "zoom"], check=True)
+        print(f"Обои успешно установлены в GNOME: {abs_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"Ошибка при установке обоев в GNOME: {e}")
+        raise Exception("Не удалось установить обои в GNOME")
 
 
 def cleanup_old_wallpapers(wallpapers_dir: Path, keep_file: Path):
@@ -168,20 +154,23 @@ def cleanup_old_wallpapers(wallpapers_dir: Path, keep_file: Path):
 def main_loop(interval_seconds=300):
     desktop_env = detect_desktop_environment()
     print(f"Определена графическая среда: {desktop_env}")
-
+    
     if desktop_env == "windows":
         wallpapers_dir = Path("wallpapers")
-        prepare_image = prepare_image_windows
         set_wallpaper = set_wallpaper_windows
     else:
         wallpapers_dir = Path.home() / ".local" / "share" / "wallpapers"
-        prepare_image = prepare_image_linux
-        set_wallpaper = set_wallpaper_kde if desktop_env == "kde" else None
-
+        if desktop_env == "kde":
+            set_wallpaper = set_wallpaper_kde
+        elif desktop_env == "gnome":
+            set_wallpaper = set_wallpaper_gnome
+        else:
+            set_wallpaper = None
+    
     if set_wallpaper is None:
         print(f"Извините, ваша графическая среда ({desktop_env}) пока не поддерживается")
         return
-
+    
     wallpapers_dir.mkdir(exist_ok=True, parents=True)
     current_wallpaper = None
     screen_size = get_screen_resolution(desktop_env)
@@ -196,21 +185,20 @@ def main_loop(interval_seconds=300):
                 cleanup_old_wallpapers(wallpapers_dir, current_wallpaper)
 
             download_image(img_url, save_path)
-            wallpaper_path = prepare_image(save_path, screen_size)
+            wallpaper_path = prepare_image(save_path, screen_size, desktop_env)
             set_wallpaper(wallpaper_path)
 
             current_wallpaper = wallpaper_path
         except Exception as e:
             print(f"Произошла ошибка: {e}")
-
+        
         print(f"Ожидание {interval_seconds} секунд до следующего обновления...")
         time.sleep(interval_seconds)
 
 
-if __name__ == "__main__":
-    try:
-        print("Запуск автоматической смены обоев")
-        print("Для остановки нажмите Ctrl+C")
-        main_loop(interval_seconds=10)
-    except KeyboardInterrupt:
-        print("\nРабота программы завершена")
+try:
+    print("Запуск автоматической смены обоев")
+    print("Для остановки нажмите Ctrl+C")
+    main_loop(interval_seconds=10)
+except KeyboardInterrupt:
+    print("\nРабота программы завершена")
